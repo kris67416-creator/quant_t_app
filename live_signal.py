@@ -5,6 +5,8 @@
 """
 
 import warnings
+import json
+import os
 from datetime import datetime, date, time as dtime, timezone, timedelta
 
 import numpy as np
@@ -38,9 +40,74 @@ try:
 except Exception:
     _BJ_TZ = timezone(timedelta(hours=8))   # 中国无夏令时，固定 UTC+8 兜底
 
+# 用户常驻墨尔本：用户本地时间固定按墨尔本算，避免云端服务器(UTC)显示错乱
+try:
+    _LOCAL_TZ = ZoneInfo("Australia/Melbourne")
+except Exception:
+    _LOCAL_TZ = timezone(timedelta(hours=10))
+
 def beijing_now() -> datetime:
     """当前北京时间（naive，便于与交易时段比较）"""
     return datetime.now(tz=_BJ_TZ).replace(tzinfo=None)
+
+def local_now() -> datetime:
+    """用户本地时间（墨尔本）——不随服务器时区变化"""
+    return datetime.now(tz=_LOCAL_TZ).replace(tzinfo=None)
+
+
+# ═══════════════════════════════════════════════════════
+# 交易记录持久化（存文件，重启/跨天不丢；按标的隔离）
+#   结构: { sym: {"open": {qty,price,time,date} | None, "history": [ {...} ]} }
+# ═══════════════════════════════════════════════════════
+_TRADE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t_trades.json")
+
+def _load_trades_all() -> dict:
+    try:
+        with open(_TRADE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_trades_all(d: dict):
+    try:
+        with open(_TRADE_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def get_sym_rec(sym: str) -> dict:
+    rec = _load_trades_all().get(sym)
+    if not rec:
+        return {"open": None, "history": []}
+    rec.setdefault("open", None)
+    rec.setdefault("history", [])
+    return rec
+
+def put_sym_rec(sym: str, rec: dict):
+    d = _load_trades_all()
+    d[sym] = rec
+    _save_trades_all(d)
+
+def record_sell(sym, qty, px, t, dstr, manual=False):
+    rec = get_sym_rec(sym)
+    rec["open"] = {"qty": qty, "price": px, "time": t, "date": dstr}
+    rec["history"].append({"date": dstr, "time": t, "action": "sell",
+                           "qty": qty, "price": px, "net": None, "manual": manual})
+    put_sym_rec(sym, rec)
+
+def record_buy(sym, qty, px, t, dstr, net, manual=False):
+    rec = get_sym_rec(sym)
+    rec["open"] = None
+    rec["history"].append({"date": dstr, "time": t, "action": "buy",
+                           "qty": qty, "price": px, "net": net, "manual": manual})
+    put_sym_rec(sym, rec)
+
+def undo_last_sell(sym):
+    rec = get_sym_rec(sym)
+    if rec["open"] and rec["history"] and rec["history"][-1]["action"] == "sell":
+        rec["history"].pop()
+    rec["open"] = None
+    put_sym_rec(sym, rec)
 
 # ═══════════════════════════════════════════════════════
 # 标的独立配置（2 股票 + 2 ETF）
@@ -260,7 +327,7 @@ with st.sidebar:
     st.divider()
     # 交易时段换算成用户本地时间（应对墨尔本等时区）
     _bj = beijing_now()
-    _local = datetime.now()
+    _local = local_now()
     _offset_h = round((_local - _bj).total_seconds() / 3600)
     def _bj2local(hh, mm):
         return (datetime(2000,1,1,hh,mm) + timedelta(hours=_offset_h)).strftime("%H:%M")
@@ -281,39 +348,29 @@ with st.sidebar:
 def _state_key(k):
     return f"{selected}_{k}"
 
-def _init_state():
-    defaults = {
-        "t_status":   "waiting_sell",
-        "sold_price": 0.0,
-        "sold_time":  None,
-        "t_count":    0,
-        "pnl":        0.0,
-        "trade_log":  [],
-        "last_date":  None,
-    }
-    for k, v in defaults.items():
-        sk = _state_key(k)
-        if sk not in st.session_state:
-            st.session_state[sk] = v
-
-_init_state()
-
 def ss(k):
-    return st.session_state[_state_key(k)]
+    return st.session_state.get(_state_key(k))
 
 def ss_set(k, v):
     st.session_state[_state_key(k)] = v
 
-# 每日重置（按北京日期，避免墨尔本等时区跨日错位）
+# 从文件载入当前标的的交易状态（文件=唯一真相，重启/跨天/换设备都不丢）
 today = beijing_now().date().isoformat()
-if ss("last_date") != today:
-    ss_set("t_status",   "waiting_sell")
-    ss_set("sold_price", 0.0)
-    ss_set("sold_time",  None)
-    ss_set("t_count",    0)
-    ss_set("pnl",        0.0)
-    ss_set("trade_log",  [])
-    ss_set("last_date",  today)
+_rec   = get_sym_rec(selected)
+_open  = _rec["open"]
+_hist  = _rec["history"]
+
+ss_set("t_status",   "waiting_buy" if _open else "waiting_sell")
+ss_set("sold_price", float(_open["price"]) if _open else 0.0)
+ss_set("sold_time",  _open["time"] if _open else None)
+ss_set("sold_date",  _open["date"] if _open else None)
+ss_set("sold_qty",   int(_open["qty"]) if _open else cfg["t_qty"])
+ss_set("history",    _hist)
+
+# 今日已完成的买回 → 今日做T次数 / 今日盈亏（按北京日期自动归零，不清历史）
+_today_buys = [h for h in _hist if h.get("action") == "buy" and h.get("date") == today]
+ss_set("t_count", len(_today_buys))
+ss_set("pnl",     float(sum((h.get("net") or 0.0) for h in _today_buys)))
 
 
 # ═══════════════════════════════════════════════════════
@@ -762,7 +819,7 @@ sig_type, sell_target, buy_target, gap_pct, analysis = compute_signal(
 
 # ── 顶部 Hero ───────────────────────────────────────
 tradable, time_reason = is_trading_time(now)
-local_t = datetime.now().strftime("%H:%M")
+local_t = local_now().strftime("%H:%M")
 chg_c   = C_UP if change_pct >= 0 else C_DOWN
 arrow   = "▲" if change_pct >= 0 else "▼"
 if gap_pct > cfg["gap_high_thr"]:
@@ -852,67 +909,40 @@ with center:
     st.markdown("")
 
     # 操作按钮
-    t_qty = cfg["t_qty"]
+    t_qty   = cfg["t_qty"]
+    now_str = now.strftime("%H:%M:%S")
     if sig_type == "SELL" and ss("t_status") == "waiting_sell":
         if st.button(f"✅ 我已卖出 {t_qty}{unit}（按卖出信号）", use_container_width=True, type="primary"):
-            ss_set("t_status",   "waiting_buy")
-            ss_set("sold_price", price)
-            ss_set("sold_time",  now.strftime("%H:%M:%S"))
-            log = ss("trade_log")
-            log.append(f"[{now.strftime('%H:%M:%S')}] 卖出 {t_qty}{unit} @ {price:.{dp}f}")
-            ss_set("trade_log", log)
+            record_sell(selected, t_qty, price, now_str, today)
             st.rerun()
 
     if sig_type in ("BUY", "STOP_LOSS", "FORCE_CLOSE") and ss("t_status") == "waiting_buy":
-        labels = {"BUY": f"✅ 我已买回 {t_qty}{unit}（按买回信号）",
-                  "STOP_LOSS": f"🚨 我已止损买回 {t_qty}{unit}",
-                  "FORCE_CLOSE": f"⏰ 已强制平仓买回 {t_qty}{unit}"}
+        labels = {"BUY": f"✅ 我已买回 {ss('sold_qty')}{unit}（按买回信号）",
+                  "STOP_LOSS": f"🚨 我已止损买回 {ss('sold_qty')}{unit}",
+                  "FORCE_CLOSE": f"⏰ 已强制平仓买回 {ss('sold_qty')}{unit}"}
         if st.button(labels[sig_type], use_container_width=True, type="primary"):
-            sold = ss("sold_price")
-            net  = (sold - price) * t_qty * (1 - COMMISSION)
-            ss_set("pnl",        ss("pnl") + net)
-            ss_set("t_count",    ss("t_count") + 1)
-            ss_set("t_status",   "waiting_sell")
-            log = ss("trade_log")
-            log.append(f"[{now.strftime('%H:%M:%S')}] 买回 {t_qty}{unit} @ {price:.{dp}f}  净盈亏 {net:+.0f}元")
-            ss_set("trade_log",  log)
-            ss_set("sold_price", 0.0)
+            sqty = ss("sold_qty")
+            net  = (ss("sold_price") - price) * sqty * (1 - COMMISSION)
+            record_buy(selected, sqty, price, now_str, today, round(net))
             st.rerun()
 
-    # 撤销卖出：挂单未成交 / 记错了 → 退回等待卖出状态（不计盈亏、不计次数）
+    # 撤销卖出：挂单未成交 / 记错了 → 退回等待卖出状态（删掉那条卖出，不计盈亏）
     if ss("t_status") == "waiting_buy":
         if st.button("↩️ 撤销这笔卖出（挂单未成交/记错）", use_container_width=True):
-            log = ss("trade_log")
-            if log and "卖出" in log[-1]:
-                log.pop()                       # 移除那条未成交的卖出记录
-                ss_set("trade_log", log)
-            ss_set("t_status",   "waiting_sell")
-            ss_set("sold_price", 0.0)
-            ss_set("sold_time",  None)
+            undo_last_sell(selected)
             st.rerun()
 
     with st.expander("手动填入实际成交价格"):
         actual = st.number_input("实际成交价", value=float(price), step=10.0 ** (-dp), format=f"%.{dp}f")
         if ss("t_status") == "waiting_sell":
             if st.button("记录卖出"):
-                ss_set("t_status",   "waiting_buy")
-                ss_set("sold_price", actual)
-                ss_set("sold_time",  now.strftime("%H:%M:%S"))
-                log = ss("trade_log")
-                log.append(f"[{now.strftime('%H:%M:%S')}] 卖出 {t_qty}{unit} @ {actual:.{dp}f} (手动)")
-                ss_set("trade_log", log)
+                record_sell(selected, t_qty, actual, now_str, today, manual=True)
                 st.rerun()
         else:
             if st.button("记录买回"):
-                sold = ss("sold_price")
-                net  = (sold - actual) * t_qty * (1 - COMMISSION)
-                ss_set("pnl",        ss("pnl") + net)
-                ss_set("t_count",    ss("t_count") + 1)
-                ss_set("t_status",   "waiting_sell")
-                log = ss("trade_log")
-                log.append(f"[{now.strftime('%H:%M:%S')}] 买回 {t_qty}{unit} @ {actual:.{dp}f}  净盈亏 {net:+.0f}元 (手动)")
-                ss_set("trade_log",  log)
-                ss_set("sold_price", 0.0)
+                sqty = ss("sold_qty")
+                net  = (ss("sold_price") - actual) * sqty * (1 - COMMISSION)
+                record_buy(selected, sqty, actual, now_str, today, round(net), manual=True)
                 st.rerun()
 
 with right:
@@ -926,11 +956,12 @@ with right:
     st.divider()
 
     if ss("t_status") == "waiting_buy" and ss("sold_price") > 0:
-        sold = ss("sold_price")
-        cur_p = (sold - price) * t_qty
+        sold = ss("sold_price"); sqty = ss("sold_qty")
+        cur_p = (sold - price) * sqty
         stop = round(sold * (1 + cfg["stop_loss_pct"]), dp)
-        st.warning(f"**T仓挂起中**\n\n"
-                   f"卖出价 {sold:.{dp}f}  ·  {ss('sold_time')}\n\n"
+        carry = "" if ss("sold_date") == today else f"  ·  {ss('sold_date')}卖出·隔日持有"
+        st.warning(f"**T仓挂起中**{carry}\n\n"
+                   f"卖出 {sqty}{unit} @ {sold:.{dp}f}  ·  {ss('sold_time')}\n\n"
                    f"当前浮动 {cur_p:+.0f}元\n\n"
                    f"止损线 {stop:.{dp}f}")
     else:
@@ -949,12 +980,18 @@ with right:
 
     st.divider()
     section_title("交易记录")
-    log = ss("trade_log")
-    if log:
-        for line in reversed(log[-5:]):
-            st.caption(line)
+    hist = ss("history") or []
+    if hist:
+        for h in reversed(hist[-8:]):
+            act    = "📤 卖出" if h.get("action") == "sell" else "📥 买回"
+            net    = h.get("net")
+            nettxt = f" · 净 {net:+.0f}元" if net is not None else ""
+            mtag   = " ·手动" if h.get("manual") else ""
+            st.caption(f"{h.get('date','')} {h.get('time','')} {act} "
+                       f"{h.get('qty')}{unit} @ {float(h.get('price',0)):.{dp}f}{nettxt}{mtag}")
+        st.caption(f"——— 共 {len(hist)} 笔（显示最近 8 笔）")
     else:
-        st.caption("今日暂无交易")
+        st.caption("暂无交易记录")
 
 # ── 底部 ──────────────────────────────────────────
 st.divider()

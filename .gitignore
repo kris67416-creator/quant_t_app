@@ -1,6 +1,9 @@
 # 绝不上传：真实持仓等敏感信息
 .streamlit/secrets.toml
 
+# 运行时交易记录（含成交价/盈亏，本地保存，不上传）
+t_trades.json
+
 __pycache__/
 *.pyc
 *.log
