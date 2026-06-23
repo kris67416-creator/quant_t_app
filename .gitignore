@@ -1,0 +1,7 @@
+# 绝不上传：真实持仓等敏感信息
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+*.log
+.DS_Store
