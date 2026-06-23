@@ -1,6 +1,8 @@
-streamlit==1.58.0
-streamlit-autorefresh==1.0.1
-akshare==1.18.64
-plotly==6.8.0
-pandas==2.3.3
-numpy==2.2.6
+# 不锁版本：让云端按它的 Python 自动选可安装的最新版
+# （锁死旧版本会在很新的 Python 上装不上，导致 plotly/akshare 缺失）
+streamlit
+streamlit-autorefresh
+akshare
+plotly
+pandas
+numpy
