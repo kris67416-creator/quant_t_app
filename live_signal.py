@@ -7,6 +7,7 @@
 import warnings
 import json
 import os
+import socket
 from datetime import datetime, date, time as dtime, timezone, timedelta
 
 import numpy as np
@@ -16,6 +17,7 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 warnings.filterwarnings("ignore")
+socket.setdefaulttimeout(10)   # 所有网络请求最多等 10 秒，连不上就快速跳过，避免无限转圈
 
 COMMISSION  = 0.00025 * 2 + 0.0005 + 0.0002 * 2
 REFRESH_SEC = 20
@@ -401,30 +403,11 @@ def fetch_prev_close(symbol_sina: str, is_etf: bool = False):
 
 @st.cache_data(ttl=REFRESH_SEC)
 def fetch_minute_bars(symbol: str, symbol_sina: str):
-    """今日1分钟K线。东财优先，挂了回退新浪。返回 OHLCV+amount，index=时间"""
+    """今日1分钟K线。新浪优先（稳定快），东财为备用。返回 OHLCV+amount，index=时间"""
     import akshare as ak
     today_str = beijing_now().strftime("%Y-%m-%d")
 
-    # ① 东方财富（最佳，近实时）
-    try:
-        df = ak.stock_zh_a_hist_min_em(
-            symbol=symbol, period="1",
-            start_date=f"{today_str} 09:30:00",
-            end_date=f"{today_str} 15:00:00",
-            adjust="",
-        )
-        if df is not None and not df.empty:
-            df.columns = ["time","open","close","high","low","volume","amount",
-                          "振幅","涨跌幅","涨跌额","换手率"]
-            df["time"] = pd.to_datetime(df["time"])
-            df.set_index("time", inplace=True)
-            out = df[["open","high","low","close","volume","amount"]].astype(float)
-            out.attrs["src"] = "东财"
-            return out
-    except Exception:
-        pass
-
-    # ② 新浪（东财挂了时的回退，可能有延迟）
+    # ① 新浪（主路径，稳定）
     try:
         df = ak.stock_zh_a_minute(symbol=symbol_sina, period="1", adjust="")
         if df is not None and not df.empty:
@@ -443,6 +426,25 @@ def fetch_minute_bars(symbol: str, symbol_sina: str):
     except Exception:
         pass
 
+    # ② 东方财富（备用；连不上会在 10 秒内超时跳过）
+    try:
+        df = ak.stock_zh_a_hist_min_em(
+            symbol=symbol, period="1",
+            start_date=f"{today_str} 09:30:00",
+            end_date=f"{today_str} 15:00:00",
+            adjust="",
+        )
+        if df is not None and not df.empty:
+            df.columns = ["time","open","close","high","low","volume","amount",
+                          "振幅","涨跌幅","涨跌额","换手率"]
+            df["time"] = pd.to_datetime(df["time"])
+            df.set_index("time", inplace=True)
+            out = df[["open","high","low","close","volume","amount"]].astype(float)
+            out.attrs["src"] = "东财"
+            return out
+    except Exception:
+        pass
+
     return pd.DataFrame()
 
 
@@ -450,30 +452,7 @@ def fetch_minute_bars(symbol: str, symbol_sina: str):
 def fetch_realtime(symbol: str, symbol_sina: str, is_etf: bool = False):
     import akshare as ak
 
-    # ① 东方财富实时快照（最佳，仅股票；ETF 不在此列表，跳过走分钟线推导）
-    if not is_etf:
-        try:
-            df = ak.stock_zh_a_spot_em()
-            row = df[df["代码"] == symbol]
-            if not row.empty:
-                r = row.iloc[0]
-                price = float(r["最新价"])
-                if price > 0:
-                    return {
-                        "price":      price,
-                        "open":       float(r["今开"]),
-                        "high":       float(r["最高"]),
-                        "low":        float(r["最低"]),
-                        "pre_close":  float(r["昨收"]),
-                        "volume":     float(r["成交量"]) * 100,
-                        "amount":     float(r["成交额"]),
-                        "change_pct": float(r["涨跌幅"]),
-                        "source":     "实时(东财)",
-                    }
-        except Exception:
-            pass
-
-    # ② 东财快照挂了/ETF→用今日分钟线推导盘中价（新浪源也走这里）
+    # ① 今日分钟线推导盘中价（新浪，稳定快速——主路径）
     try:
         bars = fetch_minute_bars(symbol, symbol_sina)
         if not bars.empty:
@@ -496,6 +475,29 @@ def fetch_realtime(symbol: str, symbol_sina: str, is_etf: bool = False):
             }
     except Exception:
         pass
+
+    # ② 东方财富实时快照（仅股票，补充；连不上会在 10 秒内超时跳过）
+    if not is_etf:
+        try:
+            df = ak.stock_zh_a_spot_em()
+            row = df[df["代码"] == symbol]
+            if not row.empty:
+                r = row.iloc[0]
+                price = float(r["最新价"])
+                if price > 0:
+                    return {
+                        "price":      price,
+                        "open":       float(r["今开"]),
+                        "high":       float(r["最高"]),
+                        "low":        float(r["最低"]),
+                        "pre_close":  float(r["昨收"]),
+                        "volume":     float(r["成交量"]) * 100,
+                        "amount":     float(r["成交额"]),
+                        "change_pct": float(r["涨跌幅"]),
+                        "source":     "实时(东财)",
+                    }
+        except Exception:
+            pass
 
     # ③ 最后兜底：上一交易日收盘
     try:
