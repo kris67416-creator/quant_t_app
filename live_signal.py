@@ -217,7 +217,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st_autorefresh(interval=REFRESH_SEC * 1000, key="live_refresh")
+# 自动刷新移到主区，按是否交易时段调节频率（见下方）
 
 # ═══════════════════════════════════════════════════════
 # 全局视觉主题（量化终端深色风）
@@ -790,6 +790,10 @@ def render_kline(bars: pd.DataFrame, current_price: float,
 # 主界面
 # ═══════════════════════════════════════════════════════
 now = beijing_now()
+
+# 智能刷新：交易时段每 REFRESH_SEC 秒；收盘/午休每 2 分钟（减少无谓刷新与卡顿）
+_tradable_now, _ = is_trading_time(now)
+st_autorefresh(interval=(REFRESH_SEC * 1000 if _tradable_now else 120000), key="live_refresh")
 
 with st.spinner("获取行情…"):
     spot = fetch_realtime(cfg["symbol"], cfg["symbol_sina"], cfg["is_etf"])
