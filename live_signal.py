@@ -62,6 +62,8 @@ def local_now() -> datetime:
 #   结构: { sym: {"open": {qty,price,time,date} | None, "history": [ {...} ]} }
 # ═══════════════════════════════════════════════════════
 _TRADE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t_trades.json")
+# 是否跑在 Streamlit Cloud（其工作目录在 /mount/...）——云端硬盘临时，记录过夜会清
+IS_CLOUD = os.path.abspath(__file__).startswith("/mount")
 
 def _load_trades_all() -> dict:
     try:
@@ -933,6 +935,9 @@ with center:
         if st.button("↩️ 撤销这笔卖出（挂单未成交/记错）", use_container_width=True):
             undo_last_sell(selected)
             st.rerun()
+
+    if IS_CLOUD:
+        st.caption("📱 手机/云端仅供看盘 —— 买卖记录请在**电脑端**操作（此处记录过夜会被清空）")
 
     with st.expander("手动填入实际成交价格"):
         actual = st.number_input("实际成交价", value=float(price), step=10.0 ** (-dp), format=f"%.{dp}f")
