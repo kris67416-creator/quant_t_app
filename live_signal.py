@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore")
 socket.setdefaulttimeout(10)   # 所有网络请求最多等 10 秒，连不上就快速跳过，避免无限转圈
 
 COMMISSION  = 0.00025 * 2 + 0.0005 + 0.0002 * 2
-REFRESH_SEC = 20
+REFRESH_SEC = 45   # 交易时段刷新间隔；放慢到45秒，避免高频重载把手机冲垮（做T看信号够用）
 
 # ── 配色（量化终端深色主题 · A股红涨绿跌）──
 C_UP     = "#f6465d"   # 涨 / 卖出
@@ -791,9 +791,9 @@ def render_kline(bars: pd.DataFrame, current_price: float,
 # ═══════════════════════════════════════════════════════
 now = beijing_now()
 
-# 智能刷新：交易时段每 REFRESH_SEC 秒；收盘/午休每 2 分钟（减少无谓刷新与卡顿）
+# 智能刷新：交易时段每 REFRESH_SEC 秒；收盘/午休每 3 分钟（减少手机端高频重载卡顿）
 _tradable_now, _ = is_trading_time(now)
-st_autorefresh(interval=(REFRESH_SEC * 1000 if _tradable_now else 120000), key="live_refresh")
+st_autorefresh(interval=(REFRESH_SEC * 1000 if _tradable_now else 180000), key="live_refresh")
 
 with st.spinner("获取行情…"):
     spot = fetch_realtime(cfg["symbol"], cfg["symbol_sina"], cfg["is_etf"])
